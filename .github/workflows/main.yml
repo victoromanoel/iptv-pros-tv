@@ -1,19 +1,18 @@
+
 name: Build APK Android TV
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: Build & Release APK
+    name: Build APK
 
     steps:
-      - name: Checkout código
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -22,34 +21,193 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Criar estrutura do projeto Android
+        run: |
+          mkdir -p app/src/main/java/com/iptvpro/app
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/assets
+          mkdir -p gradle/wrapper
+          if [ -f "index.html" ]; then
+            cp index.html app/src/main/assets/index.html
+          else
+            echo "<html><body><h1>IPTV Pro</h1></body></html>" > app/src/main/assets/index.html
+          fi
+
+      - name: Criar AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-feature android:name="android.software.leanback" android:required="false"/>
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+              <application
+                  android:allowBackup="true"
+                  android:label="IPTV Pro"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Criar MainActivity.java
+        run: |
+          cat > app/src/main/java/com/iptvpro/app/MainActivity.java << 'EOF'
+          package com.iptvpro.app;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.WebChromeClient;
+          public class MainActivity extends Activity {
+              private WebView webView;
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  WebView wv = new WebView(this);
+                  webView = wv;
+                  setContentView(wv);
+                  WebSettings s = wv.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  s.setLoadWithOverviewMode(true);
+                  s.setUseWideViewPort(true);
+                  wv.setWebViewClient(new WebViewClient());
+                  wv.setWebChromeClient(new WebChromeClient());
+                  wv.setSystemUiVisibility(
+                      View.SYSTEM_UI_FLAG_FULLSCREEN |
+                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                  );
+                  wv.loadUrl("file:///android_asset/index.html");
+              }
+              @Override
+              public boolean onKeyDown(int keyCode, KeyEvent event) {
+                  if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+                      webView.goBack(); return true;
+                  }
+                  return super.onKeyDown(keyCode, event);
+              }
+              @Override protected void onResume() { super.onResume(); webView.onResume(); }
+              @Override protected void onPause()  { super.onPause();  webView.onPause();  }
+              @Override protected void onDestroy(){ if(webView!=null) webView.destroy(); super.onDestroy(); }
+          }
+          EOF
+
+      - name: Criar resources
+        run: |
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources><string name="app_name">IPTV Pro</string></resources>
+          EOF
+          python3 -c "
+          import struct, zlib
+          def png(w,h):
+              raw=b''
+              for y in range(h):
+                  raw+=b'\x00'
+                  for x in range(w):
+                      cx,cy=abs(x-w//2),abs(y-h//2)
+                      if cx*cx+cy*cy < (min(w,h)//2-8)**2:
+                          raw+=bytes([124,58,237,255])
+                      else:
+                          raw+=bytes([6,6,14,255])
+              def c(n,d): v=zlib.crc32(n+d)&0xffffffff; return struct.pack('>I',len(d))+n+d+struct.pack('>I',v)
+              return b'\x89PNG\r\n\x1a\n'+c(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+c(b'IDAT',zlib.compress(raw))+c(b'IEND',b'')
+          open('app/src/main/res/drawable/ic_launcher.png','wb').write(png(144,144))
+          "
+
+      - name: Criar build.gradle
+        run: |
+          cat > app/build.gradle << 'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.iptvpro.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.iptvpro.app"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes { release { minifyEnabled false } }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+              lint { disable 'MissingLeanbackSupport' }
+          }
+          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
+          EOF
+
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.2.2' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          EOF
+
+          cat > settings.gradle << 'EOF'
+          rootProject.name = "IPTVPro"
+          include ':app'
+          EOF
+
+      - name: Configurar Gradle Wrapper
+        run: |
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.4-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          curl -sL https://raw.githubusercontent.com/gradle/gradle/v8.4.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+          curl -sL https://raw.githubusercontent.com/android/sunflower/main/gradlew -o gradlew
+          chmod +x gradlew
+
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          key: ${{ runner.os }}-gradle-8.4
+          restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Permissão gradlew
-        run: chmod +x ./gradlew
+      - name: Build APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Build APK Release
-        run: ./gradlew assembleRelease --no-daemon
-
-      - name: Build APK Debug
-        run: ./gradlew assembleDebug --no-daemon
-
-      - name: Upload APK Release
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: IPTV-Pro-TV-release
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: ignore
-
-      - name: Upload APK Debug
-        uses: actions/upload-artifact@v4
-        with:
-          name: IPTV-Pro-TV-debug
+          name: IPTV-Pro-TV-APK
           path: app/build/outputs/apk/debug/*.apk
+</parameter>
+</invoke>
